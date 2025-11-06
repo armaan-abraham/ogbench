@@ -26,6 +26,8 @@ flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 flags.DEFINE_string('restore_path', None, 'Restore path.')
 flags.DEFINE_integer('restore_epoch', None, 'Restore epoch.')
 
+flags.DEFINE_float('actionful_fraction', 0.9, 'Fraction of data with action labels.')
+
 flags.DEFINE_integer('train_steps', 1000000, 'Number of training steps.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
@@ -58,8 +60,7 @@ def main(_):
     env, train_dataset, _ = make_env_and_datasets(FLAGS.env_name, frame_stack=config['frame_stack'])
 
     # Partition dataset into actionless and actionful datasets
-    actionful_fraction = 0.01
-    subset_size = int(len(train_dataset['observations']) * actionful_fraction)
+    subset_size = int(len(train_dataset['observations']) * FLAGS.actionful_fraction)
     print("Actionful dataset size:", subset_size)
     actionful_dataset_dict = dict(train_dataset._dict)  # Convert from FrozenDict
     actionless_dataset_dict = dict(train_dataset._dict)
@@ -102,8 +103,8 @@ def main(_):
     last_time = time.time()
     for i in tqdm.tqdm(range(1, FLAGS.train_steps + 1), smoothing=0.1, dynamic_ncols=True):
         # Update agent.
-        batch_actionful = actionful_dataset.sample(config['batch_size'])
-        batch_actionless = actionless_dataset.sample(config['batch_size'])
+        batch_actionful = actionful_dataset.sample(int(config['batch_size'] * FLAGS.actionful_fraction))
+        batch_actionless = actionless_dataset.sample(int(config['batch_size'] * (1 - FLAGS.actionful_fraction)))
         batch = {
             "actionful": batch_actionful,
             "actionless": batch_actionless,
@@ -121,7 +122,7 @@ def main(_):
             train_logger.log(train_metrics, step=i)
 
         # Evaluate agent.
-        if i == 1 or i % FLAGS.eval_interval == 0:
+        if (i + 1) % FLAGS.eval_interval == 0:
             if FLAGS.eval_on_cpu:
                 eval_agent = jax.device_put(agent, device=jax.devices('cpu')[0])
             else:

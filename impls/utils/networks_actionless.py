@@ -399,6 +399,96 @@ class GCDiscreteBilinearCritic(GCBilinearValue):
         actions = jnp.eye(self.action_dim)[actions]
         return super().__call__(observations, goals, actions, info)
 
+# VCRL
+
+class VelocityEncoder(nn.Module):
+    hidden_dims: Sequence[int]
+    velocity_encoding_dim: int
+    layer_norm: bool = True
+    
+    def setup(self):
+        self.encoder = MLP([*self.hidden_dims, self.velocity_encoding_dim], activate_final=False, layer_norm=self.layer_norm)
+
+    def __call__(self, observations, next_observations):
+        assert observations.shape == next_observations.shape
+        velocity = jnp.concatenate([observations, next_observations], axis=-1)
+        return self.encoder(velocity)
+
+class VelocityCritic(nn.Module):
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    layer_norm: bool = True
+
+    def setup(self):
+        self.phi = MLP((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+        self.psi = MLP((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+
+    def __call__(self, observations, velocity_encodings, goals, info=False):
+        assert observations.shape[0] == velocity_encodings.shape[0]
+        phi_inputs = jnp.concatenate([observations, velocity_encodings], axis=-1)
+
+        phi = self.phi(phi_inputs)
+        psi = self.psi(goals)
+
+        v = (phi * psi / jnp.sqrt(self.latent_dim)).sum(axis=-1)
+
+        if info:
+            return v, phi, psi
+        else:
+            return v
+
+class ActionVelocityMap(nn.Module):
+    hidden_dims: Sequence[int]
+    velocity_encoding_dim: int
+    layer_norm: bool = True
+
+    def setup(self):
+        self.network = MLP((*self.hidden_dims, self.velocity_encoding_dim), activate_final=False, layer_norm=self.layer_norm)
+
+    def __call__(self, observations, actions):
+        """Maps observations and actions to velocity encodings"""
+        assert observations.shape[0] == actions.shape[0]
+        network_input = jnp.concatenate([observations, actions], axis=-1)
+        return self.network(network_input)
+
+class VCRLActor(nn.Module):
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = True
+    log_std_min: Optional[float] = -5
+    log_std_max: Optional[float] = 2
+    final_fc_init_scale: float = 1e-2
+
+    def setup(self):
+        self.actor_net = MLP(self.hidden_dims, activate_final=True)
+        self.mean_net = nn.Dense(self.action_dim, kernel_init=default_init(self.final_fc_init_scale))
+
+    def __call__(
+        self,
+        observations,
+        goals,
+        temperature=1.0,
+    ):
+        """Return the action distribution.
+
+        Args:
+            observations: Observations.
+            goals: Goals.
+            temperature: Scaling factor for the standard deviation.
+        """
+        inputs = jnp.concatenate([observations, goals], axis=-1)
+        outputs = self.actor_net(inputs)
+        means = self.mean_net(outputs)
+
+        log_stds = jnp.zeros_like(means)
+
+        log_stds = jnp.clip(log_stds, self.log_std_min, self.log_std_max)
+
+        distribution = distrax.MultivariateNormalDiag(loc=means, scale_diag=jnp.exp(log_stds) * temperature)
+
+        return distribution
+
+# CRL actionless
 
 class GCSharedEncoder(nn.Module):
     """Shared encoder for observations and goals.

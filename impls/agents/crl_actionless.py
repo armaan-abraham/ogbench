@@ -15,7 +15,7 @@ from utils.networks_actionless import (
 )
 
 
-class CRLAgent(flax.struct.PyTreeNode):
+class CRLAgentActionless(flax.struct.PyTreeNode):
     """Contrastive RL (CRL) agent.
 
     This implementation supports both AWR (actor_loss='awr') and DDPG+BC (actor_loss='ddpgbc') for the actor loss.
@@ -47,7 +47,7 @@ class CRLAgent(flax.struct.PyTreeNode):
                 params=grad_params,
             )
         else:  # module_name == 'value'
-            assert 'actions' not in batch
+            # assert 'actions' not in batch
             v, phi, psi = self.network.select('value')(
                 phi_hidden,
                 psi_hidden,
@@ -102,7 +102,7 @@ class CRLAgent(flax.struct.PyTreeNode):
             v = self.network.select('value')(phi_hidden, psi_hidden, params=grad_params)
 
             # Get Q values.
-            q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, batch['actions'], params=grad_params)
+            q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, batch['actions'])
             q = jnp.minimum(q1, q2)
             adv = q - v
 
@@ -146,7 +146,7 @@ class CRLAgent(flax.struct.PyTreeNode):
             )
 
             # Get Q values for the actor's actions.
-            q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, q_actions, params=grad_params)
+            q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, q_actions)
             q = jnp.minimum(q1, q2)
 
             # Normalize Q values by the absolute mean to make the loss scale invariant.
@@ -169,7 +169,6 @@ class CRLAgent(flax.struct.PyTreeNode):
             }
         else:
             raise ValueError(f'Unsupported actor loss: {self.config["actor_loss"]}')
-        
 
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
@@ -188,7 +187,7 @@ class CRLAgent(flax.struct.PyTreeNode):
             for key in batch["actionful"].keys()
             if key != 'actions'
         }
-        value_loss, value_info = self.contrastive_loss(combined_batch, grad_params, 'value')
+        value_loss, value_info = self.contrastive_loss(batch["actionful"], grad_params, 'value')
         for k, v in value_info.items():
             info[f'value/{k}'] = v
 
@@ -308,13 +307,13 @@ def get_config():
     config = ml_collections.ConfigDict(
         dict(
             # Agent hyperparameters.
-            agent_name='crl',  # Agent name.
+            agent_name='crl_actionless',  # Agent name.
             lr=3e-4,  # Learning rate.
             batch_size=1024,  # Batch size.
             actor_hidden_dims=(512, 512, 512),  # Actor network hidden dimensions.
-            shared_hidden_dims=(512, 512),  # Shared encoder hidden dimensions (phi and psi).
-            critic_hidden_dims=(),  # Critic head hidden dimensions (after shared encoder and action concat).
-            value_hidden_dims=(),  # Value head hidden dimensions (after shared encoder).
+            shared_hidden_dims=(512,),  # Shared encoder hidden dimensions (phi and psi).
+            critic_hidden_dims=(512, 512),  # Critic head hidden dimensions (after shared encoder and action concat).
+            value_hidden_dims=(512, 512),  # Value head hidden dimensions (after shared encoder).
             latent_dim=512,  # Latent dimension for phi and psi.
             layer_norm=True,  # Whether to use layer normalization.
             discount=0.99,  # Discount factor.
