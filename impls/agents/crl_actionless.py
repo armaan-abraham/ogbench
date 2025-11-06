@@ -30,18 +30,31 @@ class CRLAgent(flax.struct.PyTreeNode):
         """Compute the contrastive value loss for the Q or V function."""
         batch_size = batch['observations'].shape[0]
 
-        if module_name == 'critic':
-            actions = batch['actions']
-        else:
-            assert 'actions' not in batch
-            actions = None
-        v, phi, psi = self.network.select(module_name)(
+        # First, encode observations and goals through the shared encoder.
+        phi_hidden, psi_hidden = self.network.select('encoder')(
             batch['observations'],
             batch['value_goals'],
-            actions=actions,
-            info=True,
             params=grad_params,
         )
+
+        # Then, pass through the appropriate network (critic or value).
+        if module_name == 'critic':
+            v, phi, psi = self.network.select('critic')(
+                phi_hidden,
+                psi_hidden,
+                batch['actions'],
+                info=True,
+                params=grad_params,
+            )
+        else:  # module_name == 'value'
+            assert 'actions' not in batch
+            v, phi, psi = self.network.select('value')(
+                phi_hidden,
+                psi_hidden,
+                info=True,
+                params=grad_params,
+            )
+
         if len(phi.shape) == 2:  # Non-ensemble.
             phi = phi[None, ...]
             psi = psi[None, ...]
@@ -75,34 +88,87 @@ class CRLAgent(flax.struct.PyTreeNode):
         }
 
     def actor_loss(self, batch, grad_params, rng=None):
-        # AWR loss.
-        v = self.network.select('value')(batch['observations'], batch['actor_goals'])
-        q1, q2 = self.network.select('critic')(batch['observations'], batch['actor_goals'], batch['actions'])
-        q = jnp.minimum(q1, q2)
-        adv = q - v
-
-        exp_a = jnp.exp(adv * self.config['alpha'])
-        exp_a = jnp.minimum(exp_a, 100.0)
-
-        dist = self.network.select('actor')(batch['observations'], batch['actor_goals'], params=grad_params)
-        log_prob = dist.log_prob(batch['actions'])
-
-        actor_loss = -(exp_a * log_prob).mean()
-
-        actor_info = {
-            'actor_loss': actor_loss,
-            'adv': adv.mean(),
-            'bc_log_prob': log_prob.mean(),
-        }
-        if not self.config['discrete']:
-            actor_info.update(
-                {
-                    'mse': jnp.mean((dist.mode() - batch['actions']) ** 2),
-                    'std': jnp.mean(dist.scale_diag),
-                }
+        """Compute the actor loss (AWR or DDPG+BC)."""
+        if self.config['actor_loss'] == 'awr':
+            # AWR loss.
+            # First, encode through the shared encoder.
+            phi_hidden, psi_hidden = self.network.select('encoder')(
+                batch['observations'],
+                batch['actor_goals'],
+                params=grad_params,
             )
 
-        return actor_loss, actor_info
+            # Get V values.
+            v = self.network.select('value')(phi_hidden, psi_hidden, params=grad_params)
+
+            # Get Q values.
+            q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, batch['actions'], params=grad_params)
+            q = jnp.minimum(q1, q2)
+            adv = q - v
+
+            exp_a = jnp.exp(adv * self.config['alpha'])
+            exp_a = jnp.minimum(exp_a, 100.0)
+
+            dist = self.network.select('actor')(batch['observations'], batch['actor_goals'], params=grad_params)
+            log_prob = dist.log_prob(batch['actions'])
+
+            actor_loss = -(exp_a * log_prob).mean()
+
+            actor_info = {
+                'actor_loss': actor_loss,
+                'adv': adv.mean(),
+                'bc_log_prob': log_prob.mean(),
+            }
+            if not self.config['discrete']:
+                actor_info.update(
+                    {
+                        'mse': jnp.mean((dist.mode() - batch['actions']) ** 2),
+                        'std': jnp.mean(dist.scale_diag),
+                    }
+                )
+
+            return actor_loss, actor_info
+        elif self.config['actor_loss'] == 'ddpgbc':
+            # DDPG+BC loss.
+            assert not self.config['discrete']
+
+            dist = self.network.select('actor')(batch['observations'], batch['actor_goals'], params=grad_params)
+            if self.config['const_std']:
+                q_actions = jnp.clip(dist.mode(), -1, 1)
+            else:
+                q_actions = jnp.clip(dist.sample(seed=rng), -1, 1)
+
+            # Encode through the shared encoder.
+            phi_hidden, psi_hidden = self.network.select('encoder')(
+                batch['observations'],
+                batch['actor_goals'],
+                params=grad_params,
+            )
+
+            # Get Q values for the actor's actions.
+            q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, q_actions, params=grad_params)
+            q = jnp.minimum(q1, q2)
+
+            # Normalize Q values by the absolute mean to make the loss scale invariant.
+            q_loss = -q.mean() / jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-6)
+            log_prob = dist.log_prob(batch['actions'])
+
+            bc_loss = -(self.config['alpha'] * log_prob).mean()
+
+            actor_loss = q_loss + bc_loss
+
+            return actor_loss, {
+                'actor_loss': actor_loss,
+                'q_loss': q_loss,
+                'bc_loss': bc_loss,
+                'q_mean': q.mean(),
+                'q_abs_mean': jnp.abs(q).mean(),
+                'bc_log_prob': log_prob.mean(),
+                'mse': jnp.mean((dist.mode() - batch['actions']) ** 2),
+                'std': jnp.mean(dist.scale_diag),
+            }
+        else:
+            raise ValueError(f'Unsupported actor loss: {self.config["actor_loss"]}')
         
 
     @jax.jit
@@ -111,15 +177,20 @@ class CRLAgent(flax.struct.PyTreeNode):
         info = {}
         rng = rng if rng is not None else self.rng
 
+        # Update the critic using only the actionful data
         critic_loss, critic_info = self.contrastive_loss(batch["actionful"], grad_params, 'critic')
         for k, v in critic_info.items():
             info[f'critic/{k}'] = v
 
-
-        value_loss, value_info = self.contrastive_loss(batch["actionless"], grad_params, 'value')
+        # Update the value using both actionful and actionless data
+        combined_batch = {
+            key: jnp.concatenate([batch["actionful"][key], batch["actionless"][key]], axis=0)
+            for key in batch["actionful"].keys()
+            if key != 'actions'
+        }
+        value_loss, value_info = self.contrastive_loss(combined_batch, grad_params, 'value')
         for k, v in value_info.items():
             info[f'value/{k}'] = v
-
 
         rng, actor_rng = jax.random.split(rng)
         actor_loss, actor_info = self.actor_loss(batch["actionful"], grad_params, actor_rng)
