@@ -181,6 +181,7 @@ class GCDataset:
 
     def __post_init__(self):
         self.size = self.dataset.size
+        self.with_actions = True
 
         # Pre-compute trajectory boundaries.
         (self.terminal_locs,) = np.nonzero(self.dataset['terminals'] > 0)
@@ -201,6 +202,10 @@ class GCDataset:
             if self.preprocess_frame_stack:
                 stacked_observations = self.get_stacked_observations(np.arange(self.size))
                 self.dataset = Dataset(self.dataset.copy(dict(observations=stacked_observations)))
+    
+    def with_actions(self, with_actions: bool):
+        self.with_actions = with_actions
+        return self
 
     def sample(self, batch_size, idxs=None, evaluation=False):
         """Sample a batch of transitions with goals.
@@ -246,6 +251,9 @@ class GCDataset:
         if self.config['p_aug'] is not None and not evaluation:
             if np.random.rand() < self.config['p_aug']:
                 self.augment(batch, ['observations', 'next_observations', 'value_goals', 'actor_goals'])
+
+        if not self.with_actions:
+            del batch["actions"]
 
         return batch
 
