@@ -444,17 +444,30 @@ class ActionVelocityMap(nn.Module):
     hidden_dims: Sequence[int]
     velocity_encoding_dim: int
     layer_norm: bool = True
+    final_fc_init_scale: float = 1e-2
+    with_observations: bool = True
 
     def setup(self):
-        self.network = MLP((*self.hidden_dims, self.velocity_encoding_dim), activate_final=False, layer_norm=self.layer_norm)
+        self.network = MLP(self.hidden_dims, activate_final=False, layer_norm=self.layer_norm)
+        self.mean_net = nn.Dense(self.velocity_encoding_dim, kernel_init=default_init(self.final_fc_init_scale))
 
-    def __call__(self, actions, observations=None):
+    def __call__(self, actions, observations=None, temperature=1.0):
         """Maps observations and actions to velocity encodings"""
         network_input = actions
-        if observations is not None:
+        if self.with_observations:
+            assert observations is not None
             assert observations.shape[0] == actions.shape[0]
             network_input = jnp.concatenate([observations, actions], axis=-1)
-        return self.network(network_input)
+        
+        outputs = self.network(network_input)
+
+        means = self.mean_net(outputs)
+
+        log_stds = jnp.zeros_like(means)
+
+        distribution = distrax.MultivariateNormalDiag(loc=means, scale_diag=jnp.exp(log_stds) * temperature)
+
+        return distribution
 
 class VCRLActor(nn.Module):
     hidden_dims: Sequence[int]

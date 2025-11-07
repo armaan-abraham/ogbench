@@ -76,7 +76,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
         }
 
 
-    def actor_loss(self, batch, grad_params):
+    def actor_loss(self, batch, velocity_encodings, grad_params):
         batch_size = batch['observations'].shape[0]
         # For all of the observations and goals in the batch, use actor to get actions, 
         # use action velocity map to get corresponding velocity encodings,
@@ -93,21 +93,28 @@ class VCRLAgent(flax.struct.PyTreeNode):
         )
         assert actions.shape[0] == batch_size
         # Do not update the action velocity map or the critic in this loss
-        velocity_encodings = self.network.select('action_velocity_map')(
+        velocity_encodings_dist = self.network.select('action_velocity_map')(
             actions,
             observations=batch['observations'],
         )
         q1, q2 = self.network.select('critic')(
             batch['observations'],
-            velocity_encodings,
+            velocity_encodings_dist.mode(),
             batch['actor_goals'],
         )
         assert q1.shape == q2.shape
         q = jnp.minimum(q1, q2)
-        actor_loss_unnormalized = -jnp.mean(q)
-        actor_loss = actor_loss_unnormalized / jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-6)
+        q_loss_unnormalized = -jnp.mean(q)
+        q_loss = q_loss_unnormalized / jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-6)
+
+        # Compute behavioral cloning loss based on probability of observed velocities
+        log_prob = velocity_encodings_dist.log_prob(jax.lax.stop_gradient(velocity_encodings))
+        bc_loss = -(self.config['alpha'] * log_prob).mean()
+
+        actor_loss = q_loss + bc_loss
+
         return actor_loss, {
-            'actor_loss_unnorm': actor_loss_unnormalized,
+            'q_loss_unnormalized': q_loss_unnormalized,
         }
 
     def action_velocity_map_loss(self, batch, velocity_encodings, grad_params):
@@ -116,7 +123,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
             batch['actions'],
             observations=batch['observations'],
             params=grad_params,
-        )
+        ).mode()
 
         # Compute MSE loss between predicted and actual velocity encodings
         loss = jnp.mean((velocity_encodings_predicted - jax.lax.stop_gradient(velocity_encodings)) ** 2)
@@ -162,7 +169,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
             info[f'action_velocity_map/{k}'] = v
 
         # Compute actor loss on all data
-        actor_loss, actor_info = self.actor_loss(combined_batch, grad_params)
+        actor_loss, actor_info = self.actor_loss(combined_batch, velocity_encodings, grad_params)
         for k, v in actor_info.items():
             info[f'actor/{k}'] = v
 
@@ -244,6 +251,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
             hidden_dims=config['action_velocity_map_hidden_dims'],
             velocity_encoding_dim=config['velocity_encoding_dim'],
             layer_norm=config['layer_norm'],
+            with_observations=config['avm_with_obs'],
         )
 
         # Define actor network.
@@ -277,6 +285,7 @@ def get_config():
             agent_name='vcrl',  # Agent name.
             lr=3e-4,  # Learning rate.
             batch_size=1024,  # Batch size.
+            alpha=0.0,
             # Velocity encoder
             velocity_encoder_hidden_dims=(128,),
             velocity_encoding_dim=2,
@@ -294,6 +303,8 @@ def get_config():
 
             const_std=True,  # Whether to use constant standard deviation for the actor.
             discrete=False,
+
+            avm_with_obs=True,
 
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
             # Dataset hyperparameters.

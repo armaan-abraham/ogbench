@@ -12,7 +12,7 @@
 COMMANDS=(
     "python main_actionless.py --run_group=antmaze-medium --env_name=antmaze-medium-navigate-v0 --agent=agents/crl_actionless.py --agent.alpha=0.1"
     "python main_actionless.py --run_group=antmaze-medium --env_name=antmaze-medium-navigate-v0 --agent=agents/gcivl_actionless.py --agent.alpha=10.0"
-    "python main_actionless.py --run_group=antmaze-medium --env_name=antmaze-medium-navigate-v0 --agent=agents/vcrl.py --agent.velocity_encoding_dim=8"
+    "python main_actionless.py --run_group=antmaze-medium --env_name=antmaze-medium-navigate-v0 --agent=agents/vcrl.py --agent.velocity_encoding_dim=8 --agent.alpha=0.2 --agent.velocity_encoder_hidden_dims=[256,] --agent.action_velocity_map_hidden_dims=[256,]"
 )
 
 export MUJOCO_GL=egl

@@ -12,7 +12,7 @@
 COMMANDS=(
     "python main_actionless.py --env_name=pointmaze-medium-navigate-v0 --agent=agents/crl_actionless.py --agent.alpha=0.03"
     "python main_actionless.py --env_name=pointmaze-medium-navigate-v0 --agent=agents/gcivl_actionless.py --agent.alpha=10.0"
-    "python main_actionless.py --env_name=pointmaze-medium-navigate-v0 --agent=agents/vcrl.py"
+    "python main_actionless.py --env_name=pointmaze-medium-navigate-v0 --agent=agents/vcrl.py --agent.alpha=0.1"
 )
 
 export MUJOCO_GL=egl
