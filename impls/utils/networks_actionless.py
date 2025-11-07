@@ -418,10 +418,13 @@ class VelocityCritic(nn.Module):
     hidden_dims: Sequence[int]
     latent_dim: int
     layer_norm: bool = True
+    ensemble: bool = True
 
     def setup(self):
-        self.phi = MLP((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
-        self.psi = MLP((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+        if self.ensemble:
+            mlp_module = ensemblize(MLP, 2)
+        self.phi = mlp_module((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+        self.psi = mlp_module((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
 
     def __call__(self, observations, velocity_encodings, goals, info=False):
         assert observations.shape[0] == velocity_encodings.shape[0]
@@ -430,7 +433,7 @@ class VelocityCritic(nn.Module):
         phi = self.phi(phi_inputs)
         psi = self.psi(goals)
 
-        v = jnp.einsum('ik,ik->i', phi, psi) / jnp.sqrt(self.latent_dim)
+        v = (phi * psi / jnp.sqrt(self.latent_dim)).sum(axis=-1)
 
         if info:
             return v, phi, psi

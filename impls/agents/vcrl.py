@@ -41,14 +41,24 @@ class VCRLAgent(flax.struct.PyTreeNode):
             info=True,
             params=grad_params,
         )
+        if len(phi.shape) == 2:  # Non-ensemble.
+            phi = phi[None, ...]
+            psi = psi[None, ...]
 
-        logits = jnp.einsum('ik,jk->ij', phi, psi) / jnp.sqrt(phi.shape[-1])
-        # logits.shape is (B, B) with one term for positive pair and (B - 1) terms for negative pairs in each row.
+        logits = jnp.einsum('eik,ejk->ije', phi, psi) / jnp.sqrt(phi.shape[-1])
+
+        # logits.shape is (B, B, e) with one term for positive pair and (B - 1) terms for negative pairs in each row.
         I = jnp.eye(batch_size)
-        contrastive_loss = jnp.mean(optax.sigmoid_binary_cross_entropy(logits=logits, labels=I))
+        contrastive_loss = jax.vmap(
+            lambda _logits: optax.sigmoid_binary_cross_entropy(logits=_logits, labels=I),
+            in_axes=-1,
+            out_axes=-1,
+        )(logits)
+        contrastive_loss = jnp.mean(contrastive_loss)
 
         # Compute additional statistics.
         v = jnp.exp(v)
+        logits = jnp.mean(logits, axis=-1)
         correct = jnp.argmax(logits, axis=1) == jnp.argmax(I, axis=1)
         logits_pos = jnp.sum(logits * I) / jnp.sum(I)
         logits_neg = jnp.sum(logits * (1 - I)) / jnp.sum(1 - I)
@@ -64,6 +74,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
             'logits_neg': logits_neg,
             'logits': logits.mean(),
         }
+
 
     def actor_loss(self, batch, grad_params):
         batch_size = batch['observations'].shape[0]
@@ -86,17 +97,18 @@ class VCRLAgent(flax.struct.PyTreeNode):
             actions,
             observations=batch['observations'],
         )
-        critic_values = self.network.select('critic')(
+        q1, q2 = self.network.select('critic')(
             batch['observations'],
             velocity_encodings,
             batch['actor_goals'],
-        ) * self.config['alpha']
-        actor_loss_unnormalized = -jnp.mean(critic_values)
-        actor_loss = actor_loss_unnormalized / jax.lax.stop_gradient(jnp.abs(critic_values).mean() + 1e-6)
+        )
+        assert q1.shape == q2.shape
+        q = jnp.minimum(q1, q2)
+        actor_loss_unnormalized = -jnp.mean(q)
+        actor_loss = actor_loss_unnormalized / jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-6)
         return actor_loss, {
             'actor_loss_unnorm': actor_loss_unnormalized,
         }
-        
 
     def action_velocity_map_loss(self, batch, velocity_encodings, grad_params):
         # Batch is actionful
@@ -266,22 +278,23 @@ def get_config():
             lr=3e-4,  # Learning rate.
             batch_size=1024,  # Batch size.
             # Velocity encoder
-            velocity_encoder_hidden_dims=(32,),
-            velocity_encoding_dim=1,
+            velocity_encoder_hidden_dims=(128,),
+            velocity_encoding_dim=2,
             # Critic
             critic_hidden_dims=(512, 512, 512),
             latent_dim=512,  # Latent dimension for phi and psi.
             # Action velocity map
-            action_velocity_map_hidden_dims=(32,),
+            action_velocity_map_hidden_dims=(128,),
             # Actor
             actor_hidden_dims=(512, 512, 512),
 
             layer_norm=True,  # Whether to use layer normalization.
             discount=0.99,  # Discount factor.
             actor_loss='', # not supported
-            alpha=0.1,  # Temperature in AWR or BC coefficient in DDPG+BC.
+
             const_std=True,  # Whether to use constant standard deviation for the actor.
-            discrete=False,  # Whether the action space is discrete.
+            discrete=False,
+
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
             # Dataset hyperparameters.
             dataset_class='GCDataset',  # Dataset class name.

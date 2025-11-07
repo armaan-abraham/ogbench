@@ -95,11 +95,10 @@ class CRLAgentActionless(flax.struct.PyTreeNode):
             phi_hidden, psi_hidden = self.network.select('encoder')(
                 batch['observations'],
                 batch['actor_goals'],
-                params=grad_params,
             )
 
             # Get V values.
-            v = self.network.select('value')(phi_hidden, psi_hidden, params=grad_params)
+            v = self.network.select('value')(phi_hidden, psi_hidden)
 
             # Get Q values.
             q1, q2 = self.network.select('critic')(phi_hidden, psi_hidden, batch['actions'])
@@ -142,7 +141,6 @@ class CRLAgentActionless(flax.struct.PyTreeNode):
             phi_hidden, psi_hidden = self.network.select('encoder')(
                 batch['observations'],
                 batch['actor_goals'],
-                params=grad_params,
             )
 
             # Get Q values for the actor's actions.
