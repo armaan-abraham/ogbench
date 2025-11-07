@@ -129,6 +129,21 @@ class CRLAgent(flax.struct.PyTreeNode):
                 'mse': jnp.mean((dist.mode() - batch['actions']) ** 2),
                 'std': jnp.mean(dist.scale_diag),
             }
+        elif self.config['actor_loss'] == 'ql':
+            actions = jnp.clip(
+                self.network.select('actor')(batch['observations'], batch['actor_goals'], params=grad_params).mode(),
+                -1,
+                1,
+            )
+            q1, q2 = self.network.select('critic')(batch['observations'], batch['actor_goals'], actions)
+            # q = jnp.minimum(q1, q2)
+            q = q1
+            actor_loss_unnormalized = -q.mean()
+            actor_loss = actor_loss_unnormalized / jax.lax.stop_gradient(jnp.abs(q).mean() + 1e-6)
+            return actor_loss, {
+                'actor_loss': actor_loss,
+                'q_mean': q.mean(),
+            }
         else:
             raise ValueError(f'Unsupported actor loss: {self.config["actor_loss"]}')
 

@@ -42,8 +42,6 @@ class VCRLAgent(flax.struct.PyTreeNode):
             params=grad_params,
         )
 
-        assert phi.shape
-
         logits = jnp.einsum('ik,jk->ij', phi, psi) / jnp.sqrt(phi.shape[-1])
         # logits.shape is (B, B) with one term for positive pair and (B - 1) terms for negative pairs in each row.
         I = jnp.eye(batch_size)
@@ -72,17 +70,21 @@ class VCRLAgent(flax.struct.PyTreeNode):
         # For all of the observations and goals in the batch, use actor to get actions, 
         # use action velocity map to get corresponding velocity encodings,
         # and pass those to critic and maximize.
-        action_means = self.network.select('actor')(
-            batch['observations'],
-            batch['actor_goals'],
-            temperature=1.0,
-            params=grad_params,
-        ).mean()
-        assert action_means.shape == (batch_size, 2) # TODO: update
+        actions = jnp.clip(
+            self.network.select('actor')(
+                batch['observations'],
+                batch['actor_goals'],
+                temperature=1.0,
+                params=grad_params,
+            ).mode(),
+            -1,
+            1,
+        )
+        assert actions.shape[0] == batch_size
         # Do not update the action velocity map or the critic in this loss
         velocity_encodings = self.network.select('action_velocity_map')(
-            batch['observations'],
-            action_means,
+            actions,
+            observations=batch['observations'],
         )
         critic_values = self.network.select('critic')(
             batch['observations'],
@@ -99,8 +101,8 @@ class VCRLAgent(flax.struct.PyTreeNode):
     def action_velocity_map_loss(self, batch, velocity_encodings, grad_params):
         # Batch is actionful
         velocity_encodings_predicted = self.network.select('action_velocity_map')(
-            batch['observations'],
             batch['actions'],
+            observations=batch['observations'],
             params=grad_params,
         )
 
@@ -122,6 +124,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
             for key in batch["actionful"].keys()
             if key != 'actions'
         }
+        combined_batch_size = combined_batch['observations'].shape[0]
 
         # Get velocity encodings for all transitions
         velocity_encodings = self.network.select('velocity_encoder')(
@@ -129,6 +132,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
             combined_batch['next_observations'],
             params=grad_params,
         )
+        assert velocity_encodings.shape == (combined_batch_size, self.config['velocity_encoding_dim'])
         velocity_encodings_actionful = velocity_encodings[: batch["actionful"]['observations'].shape[0]]
 
         # Compute contrastive critic loss with velocity encodings for all data
@@ -240,7 +244,7 @@ class VCRLAgent(flax.struct.PyTreeNode):
         network_info = dict(
             velocity_encoder=(velocity_encoder_def, (ex_observations, ex_next_observations)),
             critic=(critic_def, (ex_observations, ex_velocity_encodings, ex_goals)),
-            action_velocity_map=(action_velocity_map_def, (ex_observations, ex_actions)),
+            action_velocity_map=(action_velocity_map_def, (ex_actions, ex_observations)),
             actor=(actor_def, (ex_observations, ex_goals))
         )
         networks = {k: v[0] for k, v in network_info.items()}
@@ -262,13 +266,13 @@ def get_config():
             lr=3e-4,  # Learning rate.
             batch_size=1024,  # Batch size.
             # Velocity encoder
-            velocity_encoder_hidden_dims=(512, 512),
-            velocity_encoding_dim=2,
+            velocity_encoder_hidden_dims=(32,),
+            velocity_encoding_dim=1,
             # Critic
             critic_hidden_dims=(512, 512, 512),
             latent_dim=512,  # Latent dimension for phi and psi.
             # Action velocity map
-            action_velocity_map_hidden_dims=(16,),
+            action_velocity_map_hidden_dims=(32,),
             # Actor
             actor_hidden_dims=(512, 512, 512),
 

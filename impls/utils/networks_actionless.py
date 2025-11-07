@@ -430,7 +430,7 @@ class VelocityCritic(nn.Module):
         phi = self.phi(phi_inputs)
         psi = self.psi(goals)
 
-        v = (phi * psi / jnp.sqrt(self.latent_dim)).sum(axis=-1)
+        v = jnp.einsum('ik,ik->i', phi, psi) / jnp.sqrt(self.latent_dim)
 
         if info:
             return v, phi, psi
@@ -445,10 +445,12 @@ class ActionVelocityMap(nn.Module):
     def setup(self):
         self.network = MLP((*self.hidden_dims, self.velocity_encoding_dim), activate_final=False, layer_norm=self.layer_norm)
 
-    def __call__(self, observations, actions):
+    def __call__(self, actions, observations=None):
         """Maps observations and actions to velocity encodings"""
-        assert observations.shape[0] == actions.shape[0]
-        network_input = jnp.concatenate([observations, actions], axis=-1)
+        network_input = actions
+        if observations is not None:
+            assert observations.shape[0] == actions.shape[0]
+            network_input = jnp.concatenate([observations, actions], axis=-1)
         return self.network(network_input)
 
 class VCRLActor(nn.Module):

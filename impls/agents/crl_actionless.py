@@ -191,6 +191,7 @@ class CRLAgentActionless(flax.struct.PyTreeNode):
         for k, v in value_info.items():
             info[f'value/{k}'] = v
 
+        # Update the actor using only the actionful data
         rng, actor_rng = jax.random.split(rng)
         actor_loss, actor_info = self.actor_loss(batch["actionful"], grad_params, actor_rng)
         for k, v in actor_info.items():
